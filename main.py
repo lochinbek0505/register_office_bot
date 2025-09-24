@@ -1,20 +1,24 @@
+import os
 import asyncio
-from datetime import datetime
-from aiogram import Bot, Dispatcher, types
+import logging
+from datetime import datetime, timezone, timedelta
+
+from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
 from aiogram.types import Message
 from aiogram.fsm.storage.memory import MemoryStorage
+
 import asyncpg
 import httpx
-import logging
 
-from datetime import datetime, timezone, timedelta
+# ---------- Timezone ----------
+TZ_TASHKENT = timezone(timedelta(hours=5))
 
-# Tashkent vaqti (UTC+5)
-tz_tashkent = timezone(timedelta(hours=5))
-time_tashkent = datetime.now(tz=tz_tashkent).strftime('%Y-%m-%d %H:%M:%S')
-
+# ---------- Env ----------
 API_TOKEN = os.getenv("BOT_TOKEN")
+if not API_TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable is missing")
+
 ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID", "0"))
 
 DB_CONFIG = {
@@ -25,76 +29,70 @@ DB_CONFIG = {
     "port": int(os.getenv("DB_PORT", "5432")),
 }
 
-
-
-user_state = {}  # foydalanuvchi holati
-
+# ---------- URLs ----------
 HEMIS_LOGIN_URL = "https://student.samdu.uz/rest/v1/auth/login"
 HEMIS_STUDENT_INFO_URL = "https://student.samdu.uz/rest/v1/account/me"
 
+# ---------- Logger ----------
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("appeals_bot")
+
+# Foydalanuvchi holati (oddiy in-memory)
+user_state = {}
 
 # ------------------- DB POOL ------------------- #
 async def create_pool():
-    return await asyncpg.create_pool(
-        user='postgres',
-        password='0104m',
-        database='appeals_db',
-        host='localhost'
-    )
+    return await asyncpg.create_pool(**DB_CONFIG)
 
 # ------------------- HEMIS FUNCTIONS ------------------- #
 async def hemis_login(hemis_id: str, password: str) -> str | None:
     headers = {
         "accept": "application/json",
         "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        "User-Agent": "Mozilla/5.0"
     }
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        try:
-            r = await client.post(
-                HEMIS_LOGIN_URL,
-                json={"login": hemis_id, "password": password},
-                headers=headers
-            )
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(HEMIS_LOGIN_URL, json={"login": hemis_id, "password": password}, headers=headers)
             if r.status_code == 200:
                 data = r.json().get("data", {})
                 return data.get("token")
-        except Exception:
-            logger.exception("HEMIS login xatosi")
+            logger.warning("HEMIS login failed: %s %s", r.status_code, r.text)
+    except Exception:
+        logger.exception("HEMIS login xatosi")
     return None
 
 async def hemis_get_student_info(token: str) -> dict | None:
     headers = {
         "accept": "application/json",
         "Authorization": f"Bearer {token}",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        "User-Agent": "Mozilla/5.0"
     }
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        try:
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.get(HEMIS_STUDENT_INFO_URL, headers=headers)
             if r.status_code == 200:
                 return r.json().get("data", {})
-        except Exception:
-            logger.exception("HEMIS student info xatosi")
+            logger.warning("HEMIS me failed: %s %s", r.status_code, r.text)
+    except Exception:
+        logger.exception("HEMIS student info xatosi")
     return None
 
-# ------------------- MAIN FUNCTION ------------------- #
+# ------------------- MAIN ------------------- #
 async def main():
     bot = Bot(token=API_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     db_pool = await create_pool()
 
-    # ---------- /start komandasi ---------- #
+    # /start
     @dp.message(Command("start"))
     async def cmd_start(msg: Message):
         uid = msg.from_user.id
         user_state[uid] = {"stage": "await_hemis"}
         await msg.answer("👋 Salom! Iltimos HEMIS login ID yuboring.")
 
-    # ---------- Foydalanuvchi xabarlari ---------- #
-    @dp.message(lambda m: m.chat.id != ADMIN_GROUP_ID and not m.text.startswith('/'))
+    # Foydalanuvchi xabarlari
+    @dp.message(lambda m: m.chat.id != ADMIN_GROUP_ID and m.text and not m.text.startswith('/'))
     async def handle_user(msg: Message):
         uid = msg.from_user.id
         if uid not in user_state:
@@ -102,14 +100,12 @@ async def main():
 
         stage = user_state[uid].get("stage")
 
-        # 1️⃣ HEMIS ID
         if stage == "await_hemis":
             user_state[uid]["hemis_id"] = msg.text.strip()
             user_state[uid]["stage"] = "await_pass"
             await msg.answer("🔑 Parol yuboring (faqat HEMIS ga yuboriladi).")
             return
 
-        # 2️⃣ Parol + HEMIS login
         if stage == "await_pass":
             hemis_id = user_state[uid]["hemis_id"]
             password = msg.text.strip()
@@ -127,12 +123,11 @@ async def main():
                 user_state.pop(uid, None)
                 return
 
-            # student info ni saqlash
             user_state[uid]["student"] = {
                 "full_name": f"{student_info.get('first_name', '')} {student_info.get('last_name', '')}".strip() or "Noma'lum",
                 "student_id": student_info.get("student_id_number", "Noma'lum"),
-                "faculty": student_info.get("faculty", {}).get("name", "Noma'lum"),
-                "group": student_info.get("group", {}).get("name", "Noma'lum"),
+                "faculty": (student_info.get("faculty") or {}).get("name", "Noma'lum"),
+                "group": (student_info.get("group") or {}).get("name", "Noma'lum"),
             }
             user_state[uid]["stage"] = "await_appeal"
             await msg.answer(
@@ -143,39 +138,42 @@ async def main():
             )
             return
 
-        # 3️⃣ Murojaat yuborish
         if stage == "await_appeal":
             student = user_state[uid]["student"]
             appeal_text = msg.text.strip()
 
             sent = await bot.send_message(
                 ADMIN_GROUP_ID,
-                f"📥 Yangi murojaat:\n"
-                f"👤 F.I.Sh: {student['full_name']}\n"
-                f"🆔 ID raqam: {student['student_id']}\n"
-                f"🏫 Fakultet: {student['faculty']}\n"
-                f"👥 Guruh: {student['group']}\n"
-                f"📝 Murojaat: {appeal_text}\n"
-                f"🕒 {datetime.now(timezone(timedelta(hours=5))).strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                f"👉 Javob berish uchun reply qiling."
+                (
+                    "📥 Yangi murojaat:\n"
+                    f"👤 F.I.Sh: {student['full_name']}\n"
+                    f"🆔 ID raqam: {student['student_id']}\n"
+                    f"🏫 Fakultet: {student['faculty']}\n"
+                    f"👥 Guruh: {student['group']}\n"
+                    f"📝 Murojaat: {appeal_text}\n"
+                    f"🕒 {datetime.now(TZ_TASHKENT).strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                    "👉 Javob berish uchun reply qiling."
+                )
             )
 
             async with db_pool.acquire() as conn:
                 await conn.execute(
                     """
                     INSERT INTO appeals (telegram_id, hemis_id, murojaat, time, group_msg_id, group_chat_id)
-                    VALUES ($1,$2,$3,$4,$5,$6)
-                    """, uid, student["student_id"], appeal_text, datetime.utcnow(), sent.message_id, sent.chat.id
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    """,
+                    uid, student["student_id"], appeal_text, datetime.utcnow(), sent.message_id, sent.chat.id
                 )
 
             await msg.answer("✅ Murojaat muvaffaqiyatli jo‘natildi.")
             user_state.pop(uid, None)
 
-    # ---------- Guruhdagi admin reply ---------- #
+    # Admin reply
     @dp.message(lambda m: m.chat.id == ADMIN_GROUP_ID and m.reply_to_message is not None)
     async def handle_group_reply(msg: Message):
         try:
-            if msg.reply_to_message.from_user.id != (await bot.get_me()).id:
+            me = await bot.get_me()
+            if msg.reply_to_message.from_user.id != me.id:
                 return
 
             replied_msg_id = msg.reply_to_message.message_id
@@ -186,20 +184,22 @@ async def main():
                     replied_msg_id
                 )
 
-                if record:
-                    telegram_id = record['telegram_id']
-                    await bot.send_message(telegram_id, f"✅ Admin javobi:\n{msg.text}")
+            if record:
+                telegram_id = record['telegram_id']
+                await bot.send_message(telegram_id, f"✅ Admin javobi:\n{msg.text}")
 
+                async with db_pool.acquire() as conn:
                     await conn.execute(
                         "UPDATE appeals SET admin_reply=$1, answered=1 WHERE group_msg_id=$2",
                         msg.text, replied_msg_id
                     )
 
-        except Exception as e:
-            logger.exception(f"Xatolik (admin reply): {e}")
+        except Exception:
+            logger.exception("Xatolik (admin reply)")
 
-    print("Bot ishga tushdi ✅")
+    logger.info("Bot ishga tushdi ✅")
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
