@@ -22,7 +22,7 @@ if not API_TOKEN:
 ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID", "0"))
 
 DB_CONFIG = {
-    "user": os.getenv("DB_USER", "postgres"),
+    "user": os.getenv("DB_USER", "appeals_user"),
     "password": os.getenv("DB_PASSWORD", ""),
     "database": os.getenv("DB_NAME", "appeals_db"),
     "host": os.getenv("DB_HOST", "127.0.0.1"),
