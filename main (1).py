@@ -7,6 +7,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 import asyncpg
 import httpx
 import logging
+import os
 
 from datetime import datetime, timezone, timedelta
 
