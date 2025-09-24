@@ -7,6 +7,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
 from aiogram.types import Message
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.exceptions import TelegramBadRequest  # <— qo‘shildi
 
 import asyncpg
 import httpx
@@ -19,7 +20,21 @@ API_TOKEN = os.getenv("BOT_TOKEN")
 if not API_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is missing")
 
-ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID", "0"))
+# ADMIN_GROUP_ID ni xom ko‘rinishda olamiz (string yoki @username bo‘lishi mumkin)
+ADMIN_GROUP_ID_RAW = (os.getenv("ADMIN_GROUP_ID") or "").strip()
+
+def _parse_chat_id(raw: str):
+    """@username bo‘lsa string qaytaradi, raqamli bo‘lsa int qaytaradi."""
+    if not raw:
+        return None
+    if raw.startswith("@"):
+        return raw
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+ADMIN_CHAT_ID = _parse_chat_id(ADMIN_GROUP_ID_RAW)
 
 DB_CONFIG = {
     "user": os.getenv("DB_USER", "appeals_user"),
@@ -78,11 +93,38 @@ async def hemis_get_student_info(token: str) -> dict | None:
         logger.exception("HEMIS student info xatosi")
     return None
 
+# ------------------- ADMIN YORDAMCHI ------------------- #
+async def validate_admin_chat(bot: Bot) -> bool:
+    """ADMIN_CHAT_ID haqiqiyligini bot.get_chat() bilan tekshiradi."""
+    if not ADMIN_CHAT_ID:
+        logger.error("ADMIN_GROUP_ID bo‘sh yoki noto‘g‘ri format: %r", ADMIN_GROUP_ID_RAW)
+        return False
+    try:
+        chat = await bot.get_chat(ADMIN_CHAT_ID)
+        logger.info("[OK] Admin chat: %s (%s)", getattr(chat, "title", None), chat.id)
+        return True
+    except TelegramBadRequest as e:
+        logger.error("[ERR] ADMIN_GROUP_ID noto‘g‘ri yoki bot a’zo emas: %s; raw=%r", e, ADMIN_GROUP_ID_RAW)
+        return False
+
+async def send_to_admin(bot: Bot, text: str):
+    """Admin chatga xavfsiz yuborish (try/except bilan)."""
+    if not ADMIN_CHAT_ID:
+        logger.error("[send_to_admin] ADMIN_GROUP_ID yo‘q/yaroqsiz. Matn: %r", text)
+        return
+    try:
+        await bot.send_message(ADMIN_CHAT_ID, text)
+    except TelegramBadRequest as e:
+        logger.error("[send_to_admin] chat not found / bad id: %s; target=%r; text=%r", e, ADMIN_GROUP_ID_RAW, text)
+
 # ------------------- MAIN ------------------- #
 async def main():
     bot = Bot(token=API_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     db_pool = await create_pool()
+
+    # Admin chatni oldindan tekshiramiz (logda aniq ko‘rinadi)
+    await validate_admin_chat(bot)
 
     # /start
     @dp.message(Command("start"))
@@ -92,7 +134,7 @@ async def main():
         await msg.answer("👋 Salom! Iltimos HEMIS login ID yuboring.")
 
     # Foydalanuvchi xabarlari
-    @dp.message(lambda m: m.chat.id != ADMIN_GROUP_ID and m.text and not m.text.startswith('/'))
+    @dp.message(lambda m: (ADMIN_CHAT_ID is None or m.chat.id != ADMIN_CHAT_ID) and m.text and not m.text.startswith('/'))
     async def handle_user(msg: Message):
         uid = msg.from_user.id
         if uid not in user_state:
@@ -142,19 +184,27 @@ async def main():
             student = user_state[uid]["student"]
             appeal_text = msg.text.strip()
 
-            sent = await bot.send_message(
-                ADMIN_GROUP_ID,
-                (
-                    "📥 Yangi murojaat:\n"
-                    f"👤 F.I.Sh: {student['full_name']}\n"
-                    f"🆔 ID raqam: {student['student_id']}\n"
-                    f"🏫 Fakultet: {student['faculty']}\n"
-                    f"👥 Guruh: {student['group']}\n"
-                    f"📝 Murojaat: {appeal_text}\n"
-                    f"🕒 {datetime.now(TZ_TASHKENT).strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                    "👉 Javob berish uchun reply qiling."
-                )
+            # Admin chatga yuborishni xavfsiz qilish
+            text_for_admin = (
+                "📥 Yangi murojaat:\n"
+                f"👤 F.I.Sh: {student['full_name']}\n"
+                f"🆔 ID raqam: {student['student_id']}\n"
+                f"🏫 Fakultet: {student['faculty']}\n"
+                f"👥 Guruh: {student['group']}\n"
+                f"📝 Murojaat: {appeal_text}\n"
+                f"🕒 {datetime.now(TZ_TASHKENT).strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                "👉 Javob berish uchun reply qiling."
             )
+
+            sent = None
+            try:
+                # Agar ADMIN_CHAT_ID yaroqli bo‘lsa — yuborib, msg_id olishga urinib ko‘ramiz
+                if ADMIN_CHAT_ID:
+                    sent = await bot.send_message(ADMIN_CHAT_ID, text_for_admin)
+                else:
+                    logger.error("ADMIN_CHAT_ID yo‘q — admin xabarini yuborib bo‘lmadim.")
+            except TelegramBadRequest as e:
+                logger.error("Admin chatga yuborishda xato: %s", e)
 
             async with db_pool.acquire() as conn:
                 await conn.execute(
@@ -162,14 +212,16 @@ async def main():
                     INSERT INTO appeals (telegram_id, hemis_id, murojaat, time, group_msg_id, group_chat_id)
                     VALUES ($1, $2, $3, $4, $5, $6)
                     """,
-                    uid, student["student_id"], appeal_text, datetime.utcnow(), sent.message_id, sent.chat.id
+                    uid, student["student_id"], appeal_text, datetime.utcnow(),
+                    (sent.message_id if sent else None),
+                    (sent.chat.id if sent else None),
                 )
 
             await msg.answer("✅ Murojaat muvaffaqiyatli jo‘natildi.")
             user_state.pop(uid, None)
 
     # Admin reply
-    @dp.message(lambda m: m.chat.id == ADMIN_GROUP_ID and m.reply_to_message is not None)
+    @dp.message(lambda m: ADMIN_CHAT_ID is not None and m.chat.id == (ADMIN_CHAT_ID if isinstance(ADMIN_CHAT_ID, int) else m.chat.id) and m.reply_to_message is not None)
     async def handle_group_reply(msg: Message):
         try:
             me = await bot.get_me()
@@ -199,7 +251,6 @@ async def main():
 
     logger.info("Bot ishga tushdi ✅")
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
