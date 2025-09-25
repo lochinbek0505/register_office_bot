@@ -269,12 +269,14 @@ async def main():
         args=(db_pool, bot, "monthly"),
         trigger=CronTrigger(day='last', hour=20, minute=0, timezone=tashkent_tz)
     )
-
+    for job in scheduler.get_jobs():
+        logger.info(f"JOB mavjud: {job}")
     scheduler.start()
 
     await dp.start_polling(bot)
 
 async def generate_and_send_report(db_pool, bot: Bot, report_type: str):
+    logger.info(f"Hisobot funksiyasi ishga tushdi: {report_type}")
     now = datetime.now(timezone.utc)
     async with db_pool.acquire() as conn:
         if report_type == "daily":
