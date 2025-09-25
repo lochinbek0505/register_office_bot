@@ -3,6 +3,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 import pandas as pd
+import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from aiogram.types import InputFile
@@ -182,7 +183,7 @@ async def main():
         if stage == "await_appeal":
             student = user_state[uid]["student"]
             appeal_text = msg.text.strip()
-
+            tashkent_tz = pytz.timezone("Asia/Tashkent")
             text_for_admin = (
                 "📥 Yangi murojaat:\n"
                 f"👤 F.I.Sh: {student['full_name']}\n"
@@ -190,7 +191,7 @@ async def main():
                 f"🏫 Fakultet: {student['faculty']}\n"
                 f"👥 Guruh: {student['group']}\n"
                 f"📝 Murojaat: {appeal_text}\n"
-                f"🕒 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                f"🕒 {datetime.now(timezone.utc).astimezone(tashkent_tz).strftime('%Y-%m-%d %H:%M:%S')}\n\n"
                 "👉 Javob berish uchun reply qiling."
             )
 
@@ -257,17 +258,17 @@ async def main():
     logger.info("Bot ishga tushdi ✅")
 
     scheduler = AsyncIOScheduler(timezone=TZ_TASHKENT)
-
+    tashkent_tz = pytz.timezone("Asia/Tashkent")
     scheduler.add_job(
         generate_and_send_report,
         args=(db_pool, bot, "daily"),
-        trigger=CronTrigger(hour=12, minute=5)
+        trigger=CronTrigger(hour=12, minute=17, timezone=tashkent_tz)
     )
 
     scheduler.add_job(
         generate_and_send_report,
         args=(db_pool, bot, "monthly"),
-        trigger=CronTrigger(day='last', hour=20, minute=0)
+        trigger=CronTrigger(day='last', hour=20, minute=0, timezone=tashkent_tz)
     )
 
     scheduler.start()
