@@ -261,7 +261,7 @@ async def main():
     scheduler.add_job(
         generate_and_send_report,
         args=(db_pool, bot, "daily"),
-        trigger=CronTrigger(hour=12, minute=17, timezone=tashkent_tz)
+        trigger=CronTrigger(hour=12, minute=29, timezone=tashkent_tz)
     )
 
     scheduler.add_job(
