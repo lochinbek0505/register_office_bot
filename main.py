@@ -248,10 +248,9 @@ async def main():
 
                 async with db_pool.acquire() as conn:
                     await conn.execute(
-                        "UPDATE appeals SET admin_reply=$1, answered=1 WHERE group_msg_id=$2",
-                        msg.text, replied_msg_id
+                        "UPDATE appeals SET admin_reply=$1, answered=$2 WHERE group_msg_id=$3",
+                        msg.text, True, replied_msg_id
                     )
-
         except Exception:
             logger.exception("Xatolik (admin reply)")
 
