@@ -261,7 +261,7 @@ async def main():
     scheduler.add_job(
         generate_and_send_report,
         args=(db_pool, bot, "daily"),
-        trigger=CronTrigger(hour=13, minute=48, timezone=tashkent_tz)
+        trigger=CronTrigger(hour=13, minute=51, timezone=tashkent_tz)
     )
 
     scheduler.add_job(
@@ -277,7 +277,7 @@ async def main():
 
 async def generate_and_send_report(db_pool, bot: Bot, report_type: str):
     logger.info(f"Hisobot funksiyasi ishga tushdi: {report_type}")
-    now = datetime.now(TZ_TASHKENT)
+    now = datetime.now()
     async with db_pool.acquire() as conn:
         if report_type == "daily":
             start_time = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
