@@ -206,13 +206,16 @@ async def main():
             async with db_pool.acquire() as conn:
                 await conn.execute(
                     """
-                    INSERT INTO appeals (telegram_id, hemis_id, murojaat, time, group_msg_id, group_chat_id, fish, fakultet, guruh)
+                    INSERT INTO appeals (
+                        telegram_id, hemis_id, murojaat, time,
+                        group_msg_id, group_chat_id, fish, fakultet, guruh
+                    )
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     """,
                     uid,
                     student["student_id"],
                     appeal_text,
-                    datetime.now(timezone.utc),  # <-- offset-aware vaqt
+                    datetime.utcnow(),
                     (sent.message_id if sent else None),
                     (sent.chat.id if sent else None),
                     student["full_name"],
